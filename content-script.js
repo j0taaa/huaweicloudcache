@@ -1,6 +1,9 @@
 const CACHE_OVERLAY_ID = "hwcc-speed-cache-overlay";
 const CACHE_SPINNER_ID = "hwcc-speed-cache-spinner";
 const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
+const PAGE_SETTLE_WINDOW_MS = 1200;
+const PAGE_SETTLE_TIMEOUT_MS = 15000;
+const IMAGE_WAIT_TIMEOUT_MS = 10000;
 
 const BADGE_STATES = {
   checking: { label: "Checking cache", background: "rgba(97, 97, 97, 0.94)" },
@@ -35,6 +38,8 @@ const BADGE_STATES = {
       removeCachedOverlay();
       removeLoadingSpinner();
 
+      await waitForPageToSettle();
+
       const snapshot = `<!doctype html>\n${document.documentElement.outerHTML}`;
       await setCachedPage(url, snapshot, document.title);
       setBadgeState("cached");
@@ -58,6 +63,116 @@ const BADGE_STATES = {
     removeLoadingSpinner();
   }
 })();
+
+async function waitForPageToSettle() {
+  await Promise.all([
+    waitForNetworkQuiet(PAGE_SETTLE_WINDOW_MS, PAGE_SETTLE_TIMEOUT_MS),
+    waitForImagesToFinish(IMAGE_WAIT_TIMEOUT_MS)
+  ]);
+
+  await waitForTwoFrames();
+}
+
+async function waitForNetworkQuiet(quietWindowMs, maxWaitMs) {
+  if (typeof PerformanceObserver !== "function") {
+    await delay(quietWindowMs);
+    return;
+  }
+
+  await new Promise((resolve) => {
+    let settled = false;
+    let quietTimer = null;
+    let timeoutTimer = null;
+
+    const cleanup = (observer) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (quietTimer) {
+        clearTimeout(quietTimer);
+      }
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
+      observer?.disconnect();
+      resolve();
+    };
+
+    const markActivity = () => {
+      if (settled) {
+        return;
+      }
+
+      if (quietTimer) {
+        clearTimeout(quietTimer);
+      }
+
+      quietTimer = setTimeout(() => cleanup(observer), quietWindowMs);
+    };
+
+    let observer = null;
+
+    try {
+      observer = new PerformanceObserver((list) => {
+        const hasResourceEntry = list
+          .getEntries()
+          .some((entry) => entry.entryType === "resource");
+
+        if (hasResourceEntry) {
+          markActivity();
+        }
+      });
+      observer.observe({ entryTypes: ["resource"] });
+    } catch {
+      observer = null;
+    }
+
+    timeoutTimer = setTimeout(() => cleanup(observer), maxWaitMs);
+    markActivity();
+  });
+}
+
+async function waitForImagesToFinish(maxWaitMs) {
+  const pendingImages = Array.from(document.images).filter((img) => !img.complete);
+  if (pendingImages.length === 0) {
+    return;
+  }
+
+  await Promise.race([
+    Promise.allSettled(
+      pendingImages.map(
+        (img) =>
+          new Promise((resolve) => {
+            const onDone = () => {
+              img.removeEventListener("load", onDone);
+              img.removeEventListener("error", onDone);
+              resolve();
+            };
+
+            img.addEventListener("load", onDone, { once: true });
+            img.addEventListener("error", onDone, { once: true });
+          })
+      )
+    ),
+    delay(maxWaitMs)
+  ]);
+}
+
+function waitForTwoFrames() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resolve);
+    });
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function showActiveBadge() {
   if (document.getElementById(ACTIVE_BADGE_ID)) {
