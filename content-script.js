@@ -4,6 +4,8 @@ const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
 const PAGE_SETTLE_WINDOW_MS = 1200;
 const PAGE_SETTLE_TIMEOUT_MS = 15000;
 const IMAGE_WAIT_TIMEOUT_MS = 10000;
+const DOM_SETTLE_WINDOW_MS = 1000;
+const EXTENSION_OWNED_ATTR = "data-hwcc-owned";
 
 const BADGE_STATES = {
   checking: { label: "Checking cache", background: "rgba(97, 97, 97, 0.94)" },
@@ -35,12 +37,13 @@ const BADGE_STATES = {
 
     const persistCurrentPage = async () => {
       setBadgeState("caching");
-      removeCachedOverlay();
-      removeLoadingSpinner();
 
       await waitForPageToSettle();
 
-      const snapshot = `<!doctype html>\n${document.documentElement.outerHTML}`;
+      removeCachedOverlay();
+      removeLoadingSpinner();
+
+      const snapshot = buildSnapshotHtml();
       await setCachedPage(url, snapshot, document.title);
       setBadgeState("cached");
     };
@@ -67,10 +70,78 @@ const BADGE_STATES = {
 async function waitForPageToSettle() {
   await Promise.all([
     waitForNetworkQuiet(PAGE_SETTLE_WINDOW_MS, PAGE_SETTLE_TIMEOUT_MS),
-    waitForImagesToFinish(IMAGE_WAIT_TIMEOUT_MS)
+    waitForImagesToFinish(IMAGE_WAIT_TIMEOUT_MS),
+    waitForDomToSettle(DOM_SETTLE_WINDOW_MS, PAGE_SETTLE_TIMEOUT_MS)
   ]);
 
+  await waitForFontsToLoad(PAGE_SETTLE_TIMEOUT_MS);
   await waitForTwoFrames();
+}
+
+async function waitForDomToSettle(quietWindowMs, maxWaitMs) {
+  if (typeof MutationObserver !== "function") {
+    await delay(quietWindowMs);
+    return;
+  }
+
+  await new Promise((resolve) => {
+    let finished = false;
+    let quietTimer = null;
+    let timeoutTimer = null;
+
+    const cleanup = (observer) => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      clearTimeout(quietTimer);
+      clearTimeout(timeoutTimer);
+      observer?.disconnect();
+      resolve();
+    };
+
+    const bumpActivity = (observer) => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => cleanup(observer), quietWindowMs);
+    };
+
+    let observer = null;
+    try {
+      observer = new MutationObserver((mutations) => {
+        const hasMeaningfulChange = mutations.some(
+          (mutation) =>
+            mutation.type === "childList" ||
+            (mutation.type === "attributes" && mutation.attributeName !== "aria-busy") ||
+            mutation.type === "characterData"
+        );
+
+        if (hasMeaningfulChange) {
+          bumpActivity(observer);
+        }
+      });
+
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true
+      });
+    } catch {
+      observer = null;
+    }
+
+    timeoutTimer = setTimeout(() => cleanup(observer), maxWaitMs);
+    bumpActivity(observer);
+  });
+}
+
+async function waitForFontsToLoad(maxWaitMs) {
+  if (!document.fonts?.ready) {
+    return;
+  }
+
+  await Promise.race([document.fonts.ready.catch(() => {}), delay(maxWaitMs)]);
 }
 
 async function waitForNetworkQuiet(quietWindowMs, maxWaitMs) {
@@ -181,6 +252,7 @@ function showActiveBadge() {
 
   const badge = document.createElement("div");
   badge.id = ACTIVE_BADGE_ID;
+  badge.setAttribute(EXTENSION_OWNED_ATTR, "true");
   badge.setAttribute("aria-live", "polite");
   badge.setAttribute("aria-atomic", "true");
   badge.setAttribute("aria-label", "Huawei cache extension status");
@@ -258,6 +330,7 @@ function showCachedOverlay(html) {
 
   const overlay = document.createElement("iframe");
   overlay.id = CACHE_OVERLAY_ID;
+  overlay.setAttribute(EXTENSION_OWNED_ATTR, "true");
   overlay.setAttribute("aria-hidden", "true");
   overlay.style.cssText = [
     "position: fixed",
@@ -296,6 +369,7 @@ function showLoadingSpinner() {
 
   const spinner = document.createElement("div");
   spinner.id = CACHE_SPINNER_ID;
+  spinner.setAttribute(EXTENSION_OWNED_ATTR, "true");
   spinner.setAttribute("aria-label", "Loading latest page");
   spinner.style.cssText = [
     "position: fixed",
@@ -314,6 +388,7 @@ function showLoadingSpinner() {
   const style = document.createElement("style");
   style.textContent = "@keyframes hwcc-spin { to { transform: rotate(360deg); } }";
   style.id = `${CACHE_SPINNER_ID}-style`;
+  style.setAttribute(EXTENSION_OWNED_ATTR, "true");
 
   const mount = () => {
     if (!document.documentElement) {
@@ -337,4 +412,12 @@ function removeLoadingSpinner() {
   if (style) {
     style.remove();
   }
+}
+
+function buildSnapshotHtml() {
+  const snapshotRoot = document.documentElement.cloneNode(true);
+  const ownedElements = snapshotRoot.querySelectorAll(`[${EXTENSION_OWNED_ATTR}="true"]`);
+  ownedElements.forEach((node) => node.remove());
+
+  return `<!doctype html>\n${snapshotRoot.outerHTML}`;
 }
