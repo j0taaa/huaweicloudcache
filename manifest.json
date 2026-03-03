@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Huawei Cloud Console Speed Cache",
+  "version": "1.0.0",
+  "description": "Makes Huawei Cloud Console feel faster by showing a cached page while the live page loads.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "*://console.huaweicloud.com/*",
+    "*://*.myhuaweicloud.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://console.huaweicloud.com/*",
+        "*://*.myhuaweicloud.com/*"
+      ],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
