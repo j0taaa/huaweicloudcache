@@ -1,10 +1,6 @@
 const CACHE_OVERLAY_ID = "hwcc-speed-cache-overlay";
 const CACHE_SPINNER_ID = "hwcc-speed-cache-spinner";
 const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
-const PAGE_SETTLE_WINDOW_MS = 1200;
-const PAGE_SETTLE_TIMEOUT_MS = 15000;
-const IMAGE_WAIT_TIMEOUT_MS = 10000;
-const DOM_SETTLE_WINDOW_MS = 1000;
 const EXTENSION_OWNED_ATTR = "data-hwcc-owned";
 
 const BADGE_STATES = {
@@ -16,6 +12,8 @@ const BADGE_STATES = {
   cached: { label: "Cache updated", background: "rgba(0, 121, 107, 0.94)" },
   error: { label: "Cache error", background: "rgba(211, 47, 47, 0.95)" }
 };
+
+const pageRequestTracker = installPageRequestTracker();
 
 (async function boot() {
   showActiveBadge();
@@ -68,43 +66,93 @@ const BADGE_STATES = {
 })();
 
 async function waitForPageToSettle() {
-  await Promise.all([
-    waitForNetworkQuiet(PAGE_SETTLE_WINDOW_MS, PAGE_SETTLE_TIMEOUT_MS),
-    waitForImagesToFinish(IMAGE_WAIT_TIMEOUT_MS),
-    waitForDomToSettle(DOM_SETTLE_WINDOW_MS, PAGE_SETTLE_TIMEOUT_MS)
-  ]);
-
-  await waitForFontsToLoad(PAGE_SETTLE_TIMEOUT_MS);
+  await waitForDocumentReadyComplete();
+  await waitForPendingRequestsToDrain(pageRequestTracker);
+  await waitForImagesToFinish();
+  await waitForFontsToLoad();
+  await waitForDomToSettle();
   await waitForTwoFrames();
 }
 
-async function waitForDomToSettle(quietWindowMs, maxWaitMs) {
-  if (typeof MutationObserver !== "function") {
-    await delay(quietWindowMs);
+function installPageRequestTracker() {
+  let pendingRequests = 0;
+  const waiters = new Set();
+
+  const notifyIfIdle = () => {
+    if (pendingRequests !== 0) {
+      return;
+    }
+
+    for (const resolve of waiters) {
+      resolve();
+    }
+    waiters.clear();
+  };
+
+  const startRequest = () => {
+    pendingRequests += 1;
+  };
+
+  const finishRequest = () => {
+    pendingRequests = Math.max(0, pendingRequests - 1);
+    notifyIfIdle();
+  };
+
+  if (typeof window.fetch === "function") {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (...args) => {
+      startRequest();
+      return originalFetch(...args).finally(finishRequest);
+    };
+  }
+
+  if (typeof XMLHttpRequest === "function") {
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (...args) {
+      startRequest();
+      this.addEventListener("loadend", finishRequest, { once: true });
+      return originalSend.apply(this, args);
+    };
+  }
+
+  return {
+    isIdle() {
+      return pendingRequests === 0;
+    },
+    waitUntilIdle() {
+      if (pendingRequests === 0) {
+        return Promise.resolve();
+      }
+
+      return new Promise((resolve) => {
+        waiters.add(resolve);
+      });
+    }
+  };
+}
+
+async function waitForDocumentReadyComplete() {
+  if (document.readyState === "complete") {
     return;
   }
 
   await new Promise((resolve) => {
-    let finished = false;
-    let quietTimer = null;
-    let timeoutTimer = null;
+    window.addEventListener("load", resolve, { once: true });
+  });
+}
 
-    const cleanup = (observer) => {
-      if (finished) {
-        return;
-      }
+async function waitForPendingRequestsToDrain(requestTracker) {
+  await requestTracker.waitUntilIdle();
+}
 
-      finished = true;
-      clearTimeout(quietTimer);
-      clearTimeout(timeoutTimer);
-      observer?.disconnect();
-      resolve();
-    };
+async function waitForDomToSettle() {
+  if (typeof MutationObserver !== "function") {
+    return;
+  }
 
-    const bumpActivity = (observer) => {
-      clearTimeout(quietTimer);
-      quietTimer = setTimeout(() => cleanup(observer), quietWindowMs);
-    };
+  await new Promise((resolve) => {
+    let hasMutation = false;
+    let quietFrames = 0;
 
     let observer = null;
     try {
@@ -117,7 +165,8 @@ async function waitForDomToSettle(quietWindowMs, maxWaitMs) {
         );
 
         if (hasMeaningfulChange) {
-          bumpActivity(observer);
+          hasMutation = true;
+          quietFrames = 0;
         }
       });
 
@@ -131,104 +180,62 @@ async function waitForDomToSettle(quietWindowMs, maxWaitMs) {
       observer = null;
     }
 
-    timeoutTimer = setTimeout(() => cleanup(observer), maxWaitMs);
-    bumpActivity(observer);
+    const checkFrame = () => {
+      if (hasMutation) {
+        hasMutation = false;
+        quietFrames = 0;
+      } else {
+        quietFrames += 1;
+      }
+
+      const stable = quietFrames >= 2;
+      if (stable && pageRequestTracker.isIdle()) {
+        observer?.disconnect();
+        resolve();
+        return;
+      }
+
+      requestAnimationFrame(checkFrame);
+    };
+
+    requestAnimationFrame(checkFrame);
   });
 }
 
-async function waitForFontsToLoad(maxWaitMs) {
+async function waitForFontsToLoad() {
   if (!document.fonts?.ready) {
     return;
   }
 
-  await Promise.race([document.fonts.ready.catch(() => {}), delay(maxWaitMs)]);
+  await document.fonts.ready.catch(() => {});
 }
 
-async function waitForNetworkQuiet(quietWindowMs, maxWaitMs) {
-  if (typeof PerformanceObserver !== "function") {
-    await delay(quietWindowMs);
+async function waitForImagesToFinish() {
+  const trackedImages = Array.from(document.images).filter((img) => !img.complete || !img.currentSrc);
+  if (trackedImages.length === 0) {
     return;
   }
 
-  await new Promise((resolve) => {
-    let settled = false;
-    let quietTimer = null;
-    let timeoutTimer = null;
+  await Promise.allSettled(
+    trackedImages.map(
+      (img) =>
+        new Promise((resolve) => {
+          if (img.complete) {
+            resolve();
+            return;
+          }
 
-    const cleanup = (observer) => {
-      if (settled) {
-        return;
-      }
+          const onDone = () => {
+            img.removeEventListener("load", onDone);
+            img.removeEventListener("error", onDone);
+            resolve();
+          };
 
-      settled = true;
-      if (quietTimer) {
-        clearTimeout(quietTimer);
-      }
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-      }
-      observer?.disconnect();
-      resolve();
-    };
-
-    const markActivity = () => {
-      if (settled) {
-        return;
-      }
-
-      if (quietTimer) {
-        clearTimeout(quietTimer);
-      }
-
-      quietTimer = setTimeout(() => cleanup(observer), quietWindowMs);
-    };
-
-    let observer = null;
-
-    try {
-      observer = new PerformanceObserver((list) => {
-        const hasResourceEntry = list
-          .getEntries()
-          .some((entry) => entry.entryType === "resource");
-
-        if (hasResourceEntry) {
-          markActivity();
-        }
-      });
-      observer.observe({ entryTypes: ["resource"] });
-    } catch {
-      observer = null;
-    }
-
-    timeoutTimer = setTimeout(() => cleanup(observer), maxWaitMs);
-    markActivity();
-  });
-}
-
-async function waitForImagesToFinish(maxWaitMs) {
-  const pendingImages = Array.from(document.images).filter((img) => !img.complete);
-  if (pendingImages.length === 0) {
-    return;
-  }
-
-  await Promise.race([
-    Promise.allSettled(
-      pendingImages.map(
-        (img) =>
-          new Promise((resolve) => {
-            const onDone = () => {
-              img.removeEventListener("load", onDone);
-              img.removeEventListener("error", onDone);
-              resolve();
-            };
-
-            img.addEventListener("load", onDone, { once: true });
-            img.addEventListener("error", onDone, { once: true });
-          })
-      )
-    ),
-    delay(maxWaitMs)
-  ]);
+          img.addEventListener("load", onDone, { once: true });
+          img.addEventListener("error", onDone, { once: true });
+        })
+    )
+  );
 }
 
 function waitForTwoFrames() {
@@ -236,12 +243,6 @@ function waitForTwoFrames() {
     requestAnimationFrame(() => {
       requestAnimationFrame(resolve);
     });
-  });
-}
-
-function delay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
   });
 }
 
