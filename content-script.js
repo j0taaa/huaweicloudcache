@@ -1,22 +1,43 @@
 const CACHE_OVERLAY_ID = "hwcc-speed-cache-overlay";
 const CACHE_SPINNER_ID = "hwcc-speed-cache-spinner";
+const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
+
+const BADGE_STATES = {
+  checking: { label: "Checking cache", background: "rgba(97, 97, 97, 0.94)" },
+  cacheHit: { label: "Cache hit", background: "rgba(56, 142, 60, 0.94)" },
+  cacheMiss: { label: "Cache miss", background: "rgba(245, 124, 0, 0.95)" },
+  loadingLive: { label: "Loading live page", background: "rgba(25, 118, 210, 0.92)" },
+  caching: { label: "Caching latest page", background: "rgba(123, 31, 162, 0.94)" },
+  cached: { label: "Cache updated", background: "rgba(0, 121, 107, 0.94)" },
+  error: { label: "Cache error", background: "rgba(211, 47, 47, 0.95)" }
+};
 
 (async function boot() {
+  showActiveBadge();
+
   try {
     const url = location.href;
+    setBadgeState("checking");
     const cache = await getCachedPage(url);
 
     if (cache?.html) {
+      setBadgeState("cacheHit");
       showCachedOverlay(cache.html);
       showLoadingSpinner();
+      setBadgeState("loadingLive");
+    } else {
+      setBadgeState("cacheMiss");
+      setBadgeState("loadingLive");
     }
 
     const persistCurrentPage = async () => {
+      setBadgeState("caching");
       removeCachedOverlay();
       removeLoadingSpinner();
 
       const snapshot = `<!doctype html>\n${document.documentElement.outerHTML}`;
       await setCachedPage(url, snapshot, document.title);
+      setBadgeState("cached");
     };
 
     if (document.readyState === "complete") {
@@ -32,10 +53,65 @@ const CACHE_SPINNER_ID = "hwcc-speed-cache-spinner";
     }
   } catch (error) {
     console.warn("Huawei cache extension error:", error);
+    setBadgeState("error", String(error));
     removeCachedOverlay();
     removeLoadingSpinner();
   }
 })();
+
+function showActiveBadge() {
+  if (document.getElementById(ACTIVE_BADGE_ID)) {
+    return;
+  }
+
+  const badge = document.createElement("div");
+  badge.id = ACTIVE_BADGE_ID;
+  badge.setAttribute("aria-live", "polite");
+  badge.setAttribute("aria-atomic", "true");
+  badge.setAttribute("aria-label", "Huawei cache extension status");
+  badge.style.cssText = [
+    "position: fixed",
+    "right: 12px",
+    "bottom: 12px",
+    "z-index: 2147483647",
+    "padding: 6px 10px",
+    "border-radius: 999px",
+    "background: rgba(25, 118, 210, 0.92)",
+    "color: #fff",
+    "font: 600 11px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif",
+    "letter-spacing: 0.02em",
+    "box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25)",
+    "pointer-events: none",
+    "user-select: none"
+  ].join(";");
+
+  const mount = () => {
+    if (!document.documentElement) {
+      requestAnimationFrame(mount);
+      return;
+    }
+    document.documentElement.appendChild(badge);
+    setBadgeState("checking");
+  };
+
+  mount();
+}
+
+function setBadgeState(state, detail = "") {
+  const badge = document.getElementById(ACTIVE_BADGE_ID);
+  if (!badge) {
+    return;
+  }
+
+  const stateMeta = BADGE_STATES[state] || BADGE_STATES.checking;
+  const suffix = detail ? ` (${detail})` : "";
+  const text = `⚡ Cache · ${stateMeta.label}`;
+
+  badge.textContent = text;
+  badge.style.background = stateMeta.background;
+  badge.title = `${stateMeta.label}${suffix}`;
+  badge.setAttribute("aria-label", `Huawei cache status: ${stateMeta.label}${suffix}`);
+}
 
 function getCachedPage(url) {
   return new Promise((resolve) => {
