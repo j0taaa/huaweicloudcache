@@ -2,24 +2,42 @@ const CACHE_OVERLAY_ID = "hwcc-speed-cache-overlay";
 const CACHE_SPINNER_ID = "hwcc-speed-cache-spinner";
 const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
 
+const BADGE_STATES = {
+  checking: { label: "Checking cache", background: "rgba(97, 97, 97, 0.94)" },
+  cacheHit: { label: "Cache hit", background: "rgba(56, 142, 60, 0.94)" },
+  cacheMiss: { label: "Cache miss", background: "rgba(245, 124, 0, 0.95)" },
+  loadingLive: { label: "Loading live page", background: "rgba(25, 118, 210, 0.92)" },
+  caching: { label: "Caching latest page", background: "rgba(123, 31, 162, 0.94)" },
+  cached: { label: "Cache updated", background: "rgba(0, 121, 107, 0.94)" },
+  error: { label: "Cache error", background: "rgba(211, 47, 47, 0.95)" }
+};
+
 (async function boot() {
   showActiveBadge();
 
   try {
     const url = location.href;
+    setBadgeState("checking");
     const cache = await getCachedPage(url);
 
     if (cache?.html) {
+      setBadgeState("cacheHit");
       showCachedOverlay(cache.html);
       showLoadingSpinner();
+      setBadgeState("loadingLive");
+    } else {
+      setBadgeState("cacheMiss");
+      setBadgeState("loadingLive");
     }
 
     const persistCurrentPage = async () => {
+      setBadgeState("caching");
       removeCachedOverlay();
       removeLoadingSpinner();
 
       const snapshot = `<!doctype html>\n${document.documentElement.outerHTML}`;
       await setCachedPage(url, snapshot, document.title);
+      setBadgeState("cached");
     };
 
     if (document.readyState === "complete") {
@@ -35,6 +53,7 @@ const ACTIVE_BADGE_ID = "hwcc-speed-cache-badge";
     }
   } catch (error) {
     console.warn("Huawei cache extension error:", error);
+    setBadgeState("error", String(error));
     removeCachedOverlay();
     removeLoadingSpinner();
   }
@@ -47,9 +66,9 @@ function showActiveBadge() {
 
   const badge = document.createElement("div");
   badge.id = ACTIVE_BADGE_ID;
-  badge.setAttribute("aria-label", "Huawei cache extension is active");
-  badge.title = "Huawei cache extension is active";
-  badge.textContent = "⚡ Cache";
+  badge.setAttribute("aria-live", "polite");
+  badge.setAttribute("aria-atomic", "true");
+  badge.setAttribute("aria-label", "Huawei cache extension status");
   badge.style.cssText = [
     "position: fixed",
     "right: 12px",
@@ -72,9 +91,26 @@ function showActiveBadge() {
       return;
     }
     document.documentElement.appendChild(badge);
+    setBadgeState("checking");
   };
 
   mount();
+}
+
+function setBadgeState(state, detail = "") {
+  const badge = document.getElementById(ACTIVE_BADGE_ID);
+  if (!badge) {
+    return;
+  }
+
+  const stateMeta = BADGE_STATES[state] || BADGE_STATES.checking;
+  const suffix = detail ? ` (${detail})` : "";
+  const text = `⚡ Cache · ${stateMeta.label}`;
+
+  badge.textContent = text;
+  badge.style.background = stateMeta.background;
+  badge.title = `${stateMeta.label}${suffix}`;
+  badge.setAttribute("aria-label", `Huawei cache status: ${stateMeta.label}${suffix}`);
 }
 
 function getCachedPage(url) {
